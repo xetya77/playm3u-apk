@@ -3,6 +3,7 @@ apply plugin: 'com.android.application'
 android {
     compileSdkVersion 34
     buildToolsVersion "34.0.0"
+    namespace "com.playm3u.app"
 
     defaultConfig {
         applicationId "com.playm3u.app"
