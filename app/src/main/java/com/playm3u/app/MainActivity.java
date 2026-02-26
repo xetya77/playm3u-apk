@@ -14,9 +14,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.JavascriptInterface;
-import android.webkit.ValueCallback;
 import android.webkit.ConsoleMessage;
-import android.net.Uri;
 import android.os.Build;
 import android.util.Log;
 
@@ -85,8 +83,6 @@ public class MainActivity extends Activity {
 
         // Storage & cache
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setAppCacheEnabled(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
 
         // Zoom
