@@ -1006,12 +1006,71 @@
   @media (hover: hover) and (pointer: fine) {
     .swipe-hint { display: none; }
   }
+
+  /* Playlist switcher modal */
+  .pl-switcher-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pl-switcher-modal {
+    background: #1a2744;
+    border-radius: 16px;
+    padding: 24px;
+    min-width: 300px;
+    max-width: 90vw;
+    max-height: 70vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .pl-switcher-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+  .pl-switcher-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-bottom: 8px;
+    background: rgba(255,255,255,0.05);
+    border: 2px solid transparent;
+    transition: all 0.2s;
+    color: #fff;
+    font-size: 15px;
+  }
+  .pl-switcher-item.active-pl {
+    border-color: var(--accent);
+    background: rgba(200,133,26,0.15);
+  }
+  .pl-switcher-item:hover { background: rgba(255,255,255,0.1); }
+  .pl-switcher-close {
+    display: block;
+    width: 100%;
+    margin-top: 16px;
+    padding: 12px;
+    background: rgba(255,255,255,0.08);
+    border: none;
+    border-radius: 10px;
+    color: rgba(255,255,255,0.6);
+    font-size: 14px;
+    cursor: pointer;
+  }
 </style>
 </head>
 <body>
 
 <!-- ===== PAGE 1: WELCOME ===== -->
-<div id="page-welcome" class="page active">
+<div id="page-welcome" class="page">
   <div class="welcome-card">
     <div class="welcome-title">PLAY M3U.</div>
     <div class="welcome-desc">
@@ -1124,7 +1183,10 @@
     <div class="page-title">Playlists</div>
   </div>
   <div class="playlist-list" id="playlist-list-container"></div>
-  <button class="btn-update" id="btn-update-pl" onclick="updatePlaylist()">Update playlists</button>
+  <div style="display:flex;gap:0;border-top:1px solid rgba(255,255,255,0.07)">
+    <button class="btn-update" id="btn-update-pl" onclick="updatePlaylist()" style="flex:1;border-right:1px solid rgba(255,255,255,0.07)">🔄 Update Playlist</button>
+    <button class="btn-update" onclick="showPlaylistSwitcher()" style="flex:1">⇄ Ganti Playlist</button>
+  </div>
   <div class="success-msg" id="update-success">Playlist telah diperbaharui</div>
   <div class="storage-section">
     <div class="storage-title">Storagespace for data</div>
@@ -1135,6 +1197,7 @@
 <!-- ===== PAGE 6: SETTINGS ===== -->
 <div id="page-settings" class="page">
   <div class="settings-header">
+    <button class="btn-back" onclick="exitApp()" style="margin-right:auto">← Keluar</button>
     <div class="page-title" style="font-size:14px">Pengaturan</div>
   </div>
   <div class="settings-list">
@@ -1244,6 +1307,18 @@ function goTo(pageId) {
   if (pageId === 'page-player') showSwipeHint();
   // Close channel list when navigating away from player
   if (pageId !== 'page-player') closeChannelList();
+}
+
+function exitApp() {
+  // Pakai AndroidBridge jika tersedia (native Android exit)
+  if (window.AndroidBridge && AndroidBridge.exitApp) {
+    AndroidBridge.exitApp();
+  } else {
+    // Fallback: minimize (Android back button behavior)
+    if (window.history && window.history.length > 1) {
+      window.history.go(-(window.history.length - 1));
+    }
+  }
 }
 
 function goBack() {
@@ -2038,44 +2113,86 @@ function init() {
   loadState();
   selectDownload('yes');
   
-  // Set default URL input style
   document.getElementById('url-input').style.background = 'var(--accent)';
   document.getElementById('url-input').style.color = 'rgba(255,255,255,0.6)';
 
-  // If playlists exist, skip welcome page
   if (state.playlists.length > 0) {
-    // On revisit, go directly to player
+    // Langsung ke player, TANPA tampilkan welcome page sama sekali
     showLoading('Mohon bersabar...', 'Memperbaharui playlist...');
+    const pl = state.playlists[state.currentPlaylist];
     
-    setTimeout(() => {
-      const pl = state.playlists[state.currentPlaylist];
-      if (pl && pl.downloadOnStart === 'yes' && pl.url && !pl.url.startsWith('file://')) {
-        fetchWithCorsProxy(pl.url)
-          .then(text => {
-            const chs = parseM3U(text);
-            if (chs.length > 0) { pl.channels = chs; saveState(); }
-            hideLoading();
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            document.getElementById('page-player').classList.add('active');
-            playChannel(state.currentChannel);
-          })
-          .catch(() => {
-            hideLoading();
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            document.getElementById('page-player').classList.add('active');
-            playChannel(state.currentChannel);
-          });
-      } else {
-        hideLoading();
-        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-        document.getElementById('page-player').classList.add('active');
-        playChannel(state.currentChannel);
-      }
-    }, 500);
+    const goPlayer = () => {
+      hideLoading();
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      document.getElementById('page-player').classList.add('active');
+      state.history = ['page-player'];
+      playChannel(state.currentChannel);
+    };
+
+    if (pl && pl.downloadOnStart === 'yes' && pl.url && !pl.url.startsWith('file://')) {
+      fetchWithCorsProxy(pl.url)
+        .then(text => {
+          const chs = parseM3U(text);
+          if (chs.length > 0) { pl.channels = chs; saveState(); }
+          goPlayer();
+        })
+        .catch(() => goPlayer());
+    } else {
+      setTimeout(goPlayer, 300);
+    }
+  } else {
+    // Belum ada playlist — tampilkan welcome page
+    document.getElementById('page-welcome').classList.add('active');
+    state.history = ['page-welcome'];
   }
 }
 
 init();
+
+function showPlaylistSwitcher() {
+  const list = document.getElementById('pl-switcher-list');
+  list.innerHTML = '';
+  state.playlists.forEach((pl, i) => {
+    const item = document.createElement('div');
+    item.className = 'pl-switcher-item' + (i === state.currentPlaylist ? ' active-pl' : '');
+    item.innerHTML = (i === state.currentPlaylist ? '▶ ' : '　') + (pl.name || 'Playlist ' + (i+1));
+    item.onclick = () => switchToPlaylist(i);
+    list.appendChild(item);
+  });
+  document.getElementById('pl-switcher').style.display = 'flex';
+}
+
+function hideSwitcher() {
+  document.getElementById('pl-switcher').style.display = 'none';
+}
+
+function switchToPlaylist(idx) {
+  hideSwitcher();
+  if (idx === state.currentPlaylist) return;
+  state.currentPlaylist = idx;
+  state.currentChannel = 0;
+  saveState();
+  // Langsung ke player dengan playlist baru
+  goTo('page-player');
+  showLoading('Mohon bersabar...', 'Memuat playlist...');
+  const pl = state.playlists[idx];
+  const goPlayer = () => {
+    hideLoading();
+    playChannel(0);
+  };
+  if (pl && pl.downloadOnStart === 'yes' && pl.url && !pl.url.startsWith('file://')) {
+    fetchWithCorsProxy(pl.url)
+      .then(text => {
+        const chs = parseM3U(text);
+        if (chs.length > 0) { pl.channels = chs; saveState(); }
+        goPlayer();
+      })
+      .catch(() => goPlayer());
+  } else {
+    goPlayer();
+  }
+}
+
 </script>
 
 <!-- ===== CHANNEL LIST PANEL ===== -->
@@ -2098,5 +2215,14 @@ init();
 <!-- Swipe hint (shown briefly on first open player) -->
 <div class="swipe-hint" id="swipe-hint">↑↓ ganti channel &nbsp;|&nbsp; ← daftar saluran</div>
 
+
+<!-- Playlist Switcher Modal -->
+<div class="pl-switcher-backdrop" id="pl-switcher" style="display:none" onclick="if(event.target===this)hideSwitcher()">
+  <div class="pl-switcher-modal">
+    <div class="pl-switcher-title">Pilih Playlist</div>
+    <div id="pl-switcher-list"></div>
+    <button class="pl-switcher-close" onclick="hideSwitcher()">Tutup</button>
+  </div>
+</div>
 </body>
 </html>
