@@ -520,7 +520,14 @@
     position: absolute;
     top: 0; left: 0;
     z-index: 1;
+    background: #000;
   }
+  /* Sembunyikan play button & controls default WebView/browser */
+  #video-el::-webkit-media-controls,
+  #video-el::-webkit-media-controls-enclosure,
+  #video-el::-webkit-media-controls-panel,
+  #video-el::-webkit-media-controls-play-button,
+  #video-el::-webkit-media-controls-overlay-play-button { display:none !important; }
 
   .player-overlay {
     position: absolute;
@@ -1122,7 +1129,7 @@
 <!-- ===== PAGE 7: PLAYER ===== -->
 <div id="page-player" class="page" style="min-height:100vh;position:relative;">
   <div class="black-flash" id="black-flash"></div>
-  <video id="video-el" autoplay playsinline></video>
+  <video id="video-el" autoplay playsinline webkit-playsinline x5-playsinline disableRemotePlayback></video>
 
   <div class="player-overlay">
     <div class="channel-info hidden" id="channel-info">
@@ -1569,44 +1576,59 @@ function playChannel(idx) {
   if (state.dashPlayer) { state.dashPlayer.reset(); state.dashPlayer = null; }
   
   const url = ch.url;
-  const ext = url.split('?')[0].split('.').pop().toLowerCase();
-  
+  const cleanUrl = url.split('?')[0].toLowerCase();
+  const ext = cleanUrl.split('.').pop();
+
+  // Sembunyikan overlay play button saat ganti channel
+  video.removeAttribute('controls');
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+
   const playDirect = () => {
     video.src = url;
     video.load();
     video.play().catch(()=>{});
   };
 
-  if (ext === 'm3u8' || url.includes('.m3u8')) {
+  // HLS: m3u8 atau URL yang tidak punya ekstensi jelas (banyak IPTV pakai format ini)
+  const isHls = ext === 'm3u8' || url.includes('.m3u8') || url.includes('m3u8')
+    || (!['mp4','mkv','avi','mpd','ts'].includes(ext) && (url.includes('/live/') || url.includes(':8080') || url.includes(':8088') || url.includes(':1935') || url.includes('/stream')));
+
+  if (isHls) {
     loadHls(() => {
       if (Hls.isSupported()) {
-        // Try direct first; if it errors, retry via CORS proxy
-        const tryHls = (srcUrl, usedProxy) => {
+        const tryHls = (srcUrl, attempt) => {
           if (state.hls) { state.hls.destroy(); state.hls = null; }
           const hls = new Hls({
-            xhrSetup: (xhr, u) => { xhr.withCredentials = false; }
+            enableWorker: true,
+            lowLatencyMode: false,
+            xhrSetup: (xhr, u) => {
+              xhr.withCredentials = false;
+              // Tambah header agar tidak diblokir server
+              xhr.setRequestHeader('User-Agent', 'Mozilla/5.0');
+            }
           });
           state.hls = hls;
           hls.loadSource(srcUrl);
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
           hls.on(Hls.Events.ERROR, (event, data) => {
-            if (data.fatal && !usedProxy) {
-              // Retry with CORS proxy
-              const proxied = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-              tryHls(proxied, true);
-            } else if (data.fatal && usedProxy) {
-              // Try allorigins proxy
-              const proxied2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-              tryHls(proxied2, 'done');
+            if (!data.fatal) return;
+            if (attempt === 0) {
+              // Coba langsung native video (untuk Android WebView yang support HLS native)
+              playDirect();
             }
           });
         };
-        tryHls(url, false);
+        tryHls(url, 0);
       } else {
+        // Android WebView biasanya support HLS native
         playDirect();
       }
     });
+  } else if (ext === 'ts' || url.includes('.ts')) {
+    // Transport Stream — coba native dulu
+    playDirect();
   } else if (ext === 'mpd' || url.includes('.mpd')) {
     // DASH
     if (!window.dashjs) {
