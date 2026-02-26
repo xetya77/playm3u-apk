@@ -223,6 +223,11 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void exitApp() {
+            finish();
+        }
+
+        @JavascriptInterface
         public boolean isAndroidTV() {
             return getPackageManager().hasSystemFeature("android.hardware.type.television") ||
                    getPackageManager().hasSystemFeature("android.software.leanback");
