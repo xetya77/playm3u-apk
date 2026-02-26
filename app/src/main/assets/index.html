@@ -1414,17 +1414,31 @@ function parseM3U(text) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.startsWith('#EXTINF')) {
-      current = {};
-      // Parse attributes
+      current = { referrer: '', userAgent: '', headers: {} };
       const logoMatch = line.match(/tvg-logo="([^"]*)"/);
       const nameMatch = line.match(/,(.+)$/);
       const groupMatch = line.match(/group-title="([^"]*)"/);
       const idMatch = line.match(/tvg-id="([^"]*)"/);
-      
+      // Baca referrer dari atribut inline (format: http-referrer="...")
+      const refInline = line.match(/http-referrer="([^"]*)"/);
       current.logo = logoMatch ? logoMatch[1] : '';
       current.name = nameMatch ? nameMatch[1].trim() : 'Channel';
       current.group = groupMatch ? groupMatch[1] : '';
       current.id = idMatch ? idMatch[1] : '';
+      if (refInline) current.referrer = refInline[1];
+    } else if (current && line.startsWith('#EXTVLCOPT')) {
+      // Baca referrer dan user-agent dari #EXTVLCOPT
+      const refMatch = line.match(/http-referrer=([^\s]+)/);
+      const uaMatch = line.match(/http-user-agent=(.+)/);
+      const originMatch = line.match(/http-origin=([^\s]+)/);
+      if (refMatch) current.referrer = refMatch[1].replace(/^["']|["']$/g, '');
+      if (uaMatch) current.userAgent = uaMatch[1].trim().replace(/^["']|["']$/g, '');
+      if (originMatch) current.headers['Origin'] = originMatch[1].replace(/^["']|["']$/g, '');
+    } else if (current && line.startsWith('#KODIPROP')) {
+      // Skip DRM props tapi tandai channel sebagai DRM
+      if (line.includes('widevine') || line.includes('clearkey')) {
+        current.hasDRM = true;
+      }
     } else if (current && !line.startsWith('#')) {
       current.url = line;
       channels.push(current);
@@ -1598,128 +1612,131 @@ function playChannel(idx) {
   
   const ch = pl.channels[idx];
   const video = document.getElementById('video-el');
+  const loadingEl = document.getElementById('video-loading');
 
-  // Destroy previous players
+  // Reset: sembunyikan video, tampilkan loading hitam
+  video.classList.remove('playing');
+  video.style.display = 'none';
+  if (loadingEl) { loadingEl.classList.remove('hidden'); }
+
+  // Stop player sebelumnya
   if (state.hls) { state.hls.destroy(); state.hls = null; }
-  if (state.dashPlayer) { state.dashPlayer.reset(); state.dashPlayer = null; }
+  if (state.dashPlayer) { try { state.dashPlayer.reset(); } catch(e){} state.dashPlayer = null; }
   
+  // Reset video
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+
   const url = ch.url;
+  const referrer = ch.referrer || '';
+  const userAgent = ch.userAgent || '';
   const cleanUrl = url.split('?')[0].toLowerCase();
   const ext = cleanUrl.split('.').pop();
 
-  // Sembunyikan overlay play button saat ganti channel
-  video.removeAttribute('controls');
-  video.setAttribute('playsinline', '');
-  video.setAttribute('webkit-playsinline', '');
-
-  // Sembunyikan video, tampilkan loading hitam
-  const loadingEl = document.getElementById('video-loading');
-  video.classList.remove('playing');
-  loadingEl.classList.remove('hidden');
-
-  // Tampilkan video & sembunyikan loading saat mulai main
-  let videoShown = false;
+  // showVideo: tampilkan video, sembunyikan loading
+  let shown = false;
   const showVideo = () => {
-    if (videoShown) return;
-    videoShown = true;
+    if (shown) return;
+    shown = true;
+    video.style.display = 'block';
     video.classList.add('playing');
-    loadingEl.classList.add('hidden');
+    if (loadingEl) loadingEl.classList.add('hidden');
   };
 
-  const playDirect = () => {
-    video.src = url;
+  // Timeout fallback: kalau 10 detik belum main, tetap tampilkan
+  // (supaya tidak stuck di layar hitam jika ada audio tapi video lambat)
+  const showTimer = setTimeout(showVideo, 10000);
+
+  // Event: tampilkan saat video & audio siap
+  const onPlaying = () => {
+    clearTimeout(showTimer);
+    showVideo();
+  };
+  video.addEventListener('playing', onPlaying, { once: true });
+
+  const playDirect = (src) => {
+    src = src || url;
+    video.src = src;
     video.load();
-    video.addEventListener('playing', showVideo, { once: true });
-    video.addEventListener('canplay', () => {
-      const p = video.play();
-      if (p) p.catch(() => {});
-    }, { once: true });
-    const p = video.play();
-    if (p) p.catch(() => {});
-    // Fallback: tampilkan setelah 6 detik walau belum main
-    setTimeout(showVideo, 6000);
+    video.play().catch(() => {});
   };
 
-  // HLS: m3u8 atau URL yang tidak punya ekstensi jelas (banyak IPTV pakai format ini)
+  // Setup HLS dengan referrer/UA jika ada
+  const tryHls = (src) => {
+    loadHls(() => {
+      if (!Hls.isSupported()) { playDirect(src); return; }
+      if (state.hls) { state.hls.destroy(); state.hls = null; }
+      const hlsCfg = {
+        enableWorker: false,
+        lowLatencyMode: false,
+        manifestLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingTimeOut: 15000,
+      };
+      // Tambah headers jika ada referrer/UA
+      if (referrer || userAgent) {
+        hlsCfg.xhrSetup = (xhr) => {
+          if (referrer) xhr.setRequestHeader('Referer', referrer);
+          if (userAgent) xhr.setRequestHeader('User-Agent', userAgent);
+        };
+      }
+      const hls = new Hls(hlsCfg);
+      state.hls = hls;
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!data.fatal) return;
+        hls.destroy(); state.hls = null;
+        playDirect(src);
+      });
+    });
+  };
+
   const isHls = ext === 'm3u8' || url.includes('.m3u8') || url.includes('m3u8')
-    || (!['mp4','mkv','avi','mpd','ts'].includes(ext) && (url.includes('/live/') || url.includes(':8080') || url.includes(':8088') || url.includes(':1935') || url.includes('/stream')));
+    || (!['mp4','mkv','avi','mpd','ts','flv'].includes(ext) && 
+        (url.includes('/live/') || url.includes(':8080') || url.includes(':8088') ||
+         url.includes(':1935') || url.includes('/stream') || url.includes('/hls') ||
+         url.includes('chunklist') || url.includes('playlist')));
 
   if (isHls) {
-    // Strategi: native WebView dulu (lebih reliable di Android untuk HLS)
+    // Coba native dulu (Android WebView support HLS native)
     video.src = url;
     video.load();
-    video.addEventListener('playing', showVideo, { once: true });
-    setTimeout(showVideo, 8000); // fallback
-    const nativePlay = video.play();
-    if (nativePlay) {
-      nativePlay.catch(() => {
-        // Native gagal → fallback hls.js
-        loadHls(() => {
-          if (!Hls.isSupported()) { playDirect(); return; }
-          if (state.hls) { state.hls.destroy(); state.hls = null; }
-          const hls = new Hls({
-            enableWorker: false,
-            lowLatencyMode: false,
-            manifestLoadingTimeOut: 15000,
-            manifestLoadingMaxRetry: 2,
-            levelLoadingTimeOut: 15000,
-          });
-          state.hls = hls;
-          hls.loadSource(url);
-          hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            video.play().catch(() => {});
-          });
-          hls.on(Hls.Events.ERROR, (_, data) => {
-            if (!data.fatal) return;
-            playDirect(); // last resort
-          });
-        });
+    const p = video.play();
+    if (p) {
+      p.catch(() => {
+        // Native gagal → hls.js
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+        tryHls(url);
       });
     }
-  } else if (ext === 'ts' || url.includes('.ts')) {
-    playDirect();
   } else if (ext === 'mpd' || url.includes('.mpd')) {
     // DASH
     if (!window.dashjs) {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/dashjs/4.7.4/dash.all.min.js';
-      script.onload = () => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/dashjs/4.7.4/dash.all.min.js';
+      s.onload = () => {
         const player = dashjs.MediaPlayer().create();
         state.dashPlayer = player;
         player.initialize(video, url, true);
       };
-      document.head.appendChild(script);
+      document.head.appendChild(s);
     } else {
       const player = dashjs.MediaPlayer().create();
       state.dashPlayer = player;
       player.initialize(video, url, true);
     }
   } else {
-    // URL tidak dikenali - coba native dulu, fallback hls.js
-    video.src = url;
-    video.load();
-    video.addEventListener('playing', showVideo, { once: true });
-    setTimeout(showVideo, 6000);
-    const unknownPlay = video.play();
-    if (unknownPlay) {
-      unknownPlay.catch(() => {
-        loadHls(() => {
-          if (!Hls.isSupported()) { playDirect(); return; }
-          if (state.hls) { state.hls.destroy(); state.hls = null; }
-          const hls = new Hls({ enableWorker: false });
-          state.hls = hls;
-          hls.loadSource(url);
-          hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
-          hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) playDirect(); });
-        });
-      });
-    }
+    playDirect();
   }
-  
+
   showChannelInfo(idx);
 }
+
 
 function showChannelInfo(idx) {
   const pl = state.playlists[state.currentPlaylist];
