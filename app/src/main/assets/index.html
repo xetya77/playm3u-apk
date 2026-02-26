@@ -1584,10 +1584,22 @@ function playChannel(idx) {
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
 
+  // Sembunyikan video sementara untuk cegah tombol play abu-abu
+  video.style.visibility = 'hidden';
+
   const playDirect = () => {
     video.src = url;
     video.load();
-    video.play().catch(()=>{});
+    const p = video.play();
+    if (p) p.catch(()=>{});
+    // Tampilkan video begitu mulai main
+    const onPlaying = () => {
+      video.style.visibility = 'visible';
+      video.removeEventListener('playing', onPlaying);
+    };
+    video.addEventListener('playing', onPlaying);
+    // Fallback tampilkan setelah 5 detik
+    setTimeout(() => { video.style.visibility = 'visible'; }, 5000);
   };
 
   // HLS: m3u8 atau URL yang tidak punya ekstensi jelas (banyak IPTV pakai format ini)
@@ -1595,39 +1607,45 @@ function playChannel(idx) {
     || (!['mp4','mkv','avi','mpd','ts'].includes(ext) && (url.includes('/live/') || url.includes(':8080') || url.includes(':8088') || url.includes(':1935') || url.includes('/stream')));
 
   if (isHls) {
-    loadHls(() => {
-      if (Hls.isSupported()) {
-        const tryHls = (srcUrl, attempt) => {
+    // Strategi 1: Coba native dulu (Android WebView support HLS native sejak Android 4.1)
+    // Ini lebih reliable di WebView daripada hls.js untuk banyak stream IPTV
+    video.src = url;
+    video.load();
+    const nativePlay = video.play();
+    if (nativePlay) {
+      nativePlay.then(() => {
+        // Native berhasil - tidak perlu hls.js
+      }).catch(() => {
+        // Native gagal - fallback ke hls.js
+        loadHls(() => {
+          if (!Hls.isSupported()) { playDirect(); return; }
           if (state.hls) { state.hls.destroy(); state.hls = null; }
           const hls = new Hls({
-            enableWorker: true,
+            enableWorker: false,  // Di WebView lebih stabil tanpa worker
             lowLatencyMode: false,
-            xhrSetup: (xhr, u) => {
-              xhr.withCredentials = false;
-              // Tambah header agar tidak diblokir server
-              xhr.setRequestHeader('User-Agent', 'Mozilla/5.0');
-            }
+            manifestLoadingTimeOut: 15000,
+            manifestLoadingMaxRetry: 3,
+            levelLoadingTimeOut: 15000,
           });
           state.hls = hls;
-          hls.loadSource(srcUrl);
+          hls.loadSource(url);
           hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            video.play().catch(()=>{});
+          });
           hls.on(Hls.Events.ERROR, (event, data) => {
             if (!data.fatal) return;
-            if (attempt === 0) {
-              // Coba langsung native video (untuk Android WebView yang support HLS native)
-              playDirect();
-            }
+            // Terakhir: coba playDirect lagi
+            playDirect();
           });
-        };
-        tryHls(url, 0);
-      } else {
-        // Android WebView biasanya support HLS native
-        playDirect();
-      }
-    });
+        });
+      });
+    }
+    // Show video setelah playing event
+    const onP = () => { video.style.visibility='visible'; video.removeEventListener('playing',onP); };
+    video.addEventListener('playing', onP);
+    setTimeout(() => { video.style.visibility='visible'; }, 5000);
   } else if (ext === 'ts' || url.includes('.ts')) {
-    // Transport Stream — coba native dulu
     playDirect();
   } else if (ext === 'mpd' || url.includes('.mpd')) {
     // DASH
@@ -1646,7 +1664,28 @@ function playChannel(idx) {
       player.initialize(video, url, true);
     }
   } else {
-    playDirect();
+    // URL tidak dikenali - coba native dulu, kalau gagal coba via hls.js
+    video.src = url;
+    video.load();
+    const unknownPlay = video.play();
+    if (unknownPlay) {
+      unknownPlay.catch(() => {
+        // Coba hls.js sebagai last resort
+        loadHls(() => {
+          if (!Hls.isSupported()) return;
+          if (state.hls) { state.hls.destroy(); state.hls = null; }
+          const hls = new Hls({ enableWorker: false });
+          state.hls = hls;
+          hls.loadSource(url);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+          hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) playDirect(); });
+        });
+      });
+    }
+    const onP2 = () => { video.style.visibility='visible'; video.removeEventListener('playing',onP2); };
+    video.addEventListener('playing', onP2);
+    setTimeout(() => { video.style.visibility='visible'; }, 5000);
   }
   
   showChannelInfo(idx);
@@ -1695,11 +1734,23 @@ function showChannelInfo(idx) {
 
 function changeChannel(newIdx) {
   const flash = document.getElementById('black-flash');
+  // Tampilkan layar hitam dulu
   flash.classList.add('active');
   setTimeout(() => {
     playChannel(newIdx);
-    setTimeout(() => flash.classList.remove('active'), 300);
-  }, 150);
+    // Tunggu video benar-benar mulai main baru hilangkan layar hitam
+    const vid = document.getElementById('video-el');
+    const onPlay = () => {
+      setTimeout(() => flash.classList.remove('active'), 200);
+      vid.removeEventListener('playing', onPlay);
+    };
+    vid.addEventListener('playing', onPlay);
+    // Fallback: hapus overlay setelah 4 detik walau video belum main
+    setTimeout(() => {
+      flash.classList.remove('active');
+      vid.removeEventListener('playing', onPlay);
+    }, 4000);
+  }, 100);
 }
 
 // ===== CHANNEL NUMBER INPUT =====
