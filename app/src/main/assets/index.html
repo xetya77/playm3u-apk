@@ -521,13 +521,37 @@
     top: 0; left: 0;
     z-index: 1;
     background: #000;
+    display: none; /* Tersembunyi sampai video benar-benar main */
   }
-  /* Sembunyikan play button & controls default WebView/browser */
-  #video-el::-webkit-media-controls,
-  #video-el::-webkit-media-controls-enclosure,
-  #video-el::-webkit-media-controls-panel,
-  #video-el::-webkit-media-controls-play-button,
-  #video-el::-webkit-media-controls-overlay-play-button { display:none !important; }
+  #video-el.playing {
+    display: block;
+  }
+  /* Loading placeholder hitam - muncul saat video loading */
+  #video-loading {
+    position: absolute;
+    inset: 0;
+    background: #000;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #video-loading.hidden { display: none; }
+  .loading-dots {
+    display: flex; gap: 8px;
+  }
+  .loading-dots span {
+    width: 8px; height: 8px;
+    background: rgba(255,255,255,0.3);
+    border-radius: 50%;
+    animation: dot-pulse 1.2s infinite ease-in-out;
+  }
+  .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes dot-pulse {
+    0%, 80%, 100% { transform: scale(0.7); opacity: 0.3; }
+    40% { transform: scale(1); opacity: 1; }
+  }
 
   .player-overlay {
     position: absolute;
@@ -1129,6 +1153,10 @@
 <!-- ===== PAGE 7: PLAYER ===== -->
 <div id="page-player" class="page" style="min-height:100vh;position:relative;">
   <div class="black-flash" id="black-flash"></div>
+  <!-- Loading placeholder hitam (cegah tombol play abu-abu WebView) -->
+  <div id="video-loading">
+    <div class="loading-dots"><span></span><span></span><span></span></div>
+  </div>
   <video id="video-el" autoplay playsinline webkit-playsinline x5-playsinline disableRemotePlayback></video>
 
   <div class="player-overlay">
@@ -1584,22 +1612,32 @@ function playChannel(idx) {
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
 
-  // Sembunyikan video sementara untuk cegah tombol play abu-abu
-  video.style.visibility = 'hidden';
+  // Sembunyikan video, tampilkan loading hitam
+  const loadingEl = document.getElementById('video-loading');
+  video.classList.remove('playing');
+  loadingEl.classList.remove('hidden');
+
+  // Tampilkan video & sembunyikan loading saat mulai main
+  let videoShown = false;
+  const showVideo = () => {
+    if (videoShown) return;
+    videoShown = true;
+    video.classList.add('playing');
+    loadingEl.classList.add('hidden');
+  };
 
   const playDirect = () => {
     video.src = url;
     video.load();
+    video.addEventListener('playing', showVideo, { once: true });
+    video.addEventListener('canplay', () => {
+      const p = video.play();
+      if (p) p.catch(() => {});
+    }, { once: true });
     const p = video.play();
-    if (p) p.catch(()=>{});
-    // Tampilkan video begitu mulai main
-    const onPlaying = () => {
-      video.style.visibility = 'visible';
-      video.removeEventListener('playing', onPlaying);
-    };
-    video.addEventListener('playing', onPlaying);
-    // Fallback tampilkan setelah 5 detik
-    setTimeout(() => { video.style.visibility = 'visible'; }, 5000);
+    if (p) p.catch(() => {});
+    // Fallback: tampilkan setelah 6 detik walau belum main
+    setTimeout(showVideo, 6000);
   };
 
   // HLS: m3u8 atau URL yang tidak punya ekstensi jelas (banyak IPTV pakai format ini)
@@ -1607,44 +1645,38 @@ function playChannel(idx) {
     || (!['mp4','mkv','avi','mpd','ts'].includes(ext) && (url.includes('/live/') || url.includes(':8080') || url.includes(':8088') || url.includes(':1935') || url.includes('/stream')));
 
   if (isHls) {
-    // Strategi 1: Coba native dulu (Android WebView support HLS native sejak Android 4.1)
-    // Ini lebih reliable di WebView daripada hls.js untuk banyak stream IPTV
+    // Strategi: native WebView dulu (lebih reliable di Android untuk HLS)
     video.src = url;
     video.load();
+    video.addEventListener('playing', showVideo, { once: true });
+    setTimeout(showVideo, 8000); // fallback
     const nativePlay = video.play();
     if (nativePlay) {
-      nativePlay.then(() => {
-        // Native berhasil - tidak perlu hls.js
-      }).catch(() => {
-        // Native gagal - fallback ke hls.js
+      nativePlay.catch(() => {
+        // Native gagal → fallback hls.js
         loadHls(() => {
           if (!Hls.isSupported()) { playDirect(); return; }
           if (state.hls) { state.hls.destroy(); state.hls = null; }
           const hls = new Hls({
-            enableWorker: false,  // Di WebView lebih stabil tanpa worker
+            enableWorker: false,
             lowLatencyMode: false,
             manifestLoadingTimeOut: 15000,
-            manifestLoadingMaxRetry: 3,
+            manifestLoadingMaxRetry: 2,
             levelLoadingTimeOut: 15000,
           });
           state.hls = hls;
           hls.loadSource(url);
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            video.play().catch(()=>{});
+            video.play().catch(() => {});
           });
-          hls.on(Hls.Events.ERROR, (event, data) => {
+          hls.on(Hls.Events.ERROR, (_, data) => {
             if (!data.fatal) return;
-            // Terakhir: coba playDirect lagi
-            playDirect();
+            playDirect(); // last resort
           });
         });
       });
     }
-    // Show video setelah playing event
-    const onP = () => { video.style.visibility='visible'; video.removeEventListener('playing',onP); };
-    video.addEventListener('playing', onP);
-    setTimeout(() => { video.style.visibility='visible'; }, 5000);
   } else if (ext === 'ts' || url.includes('.ts')) {
     playDirect();
   } else if (ext === 'mpd' || url.includes('.mpd')) {
@@ -1664,28 +1696,26 @@ function playChannel(idx) {
       player.initialize(video, url, true);
     }
   } else {
-    // URL tidak dikenali - coba native dulu, kalau gagal coba via hls.js
+    // URL tidak dikenali - coba native dulu, fallback hls.js
     video.src = url;
     video.load();
+    video.addEventListener('playing', showVideo, { once: true });
+    setTimeout(showVideo, 6000);
     const unknownPlay = video.play();
     if (unknownPlay) {
       unknownPlay.catch(() => {
-        // Coba hls.js sebagai last resort
         loadHls(() => {
-          if (!Hls.isSupported()) return;
+          if (!Hls.isSupported()) { playDirect(); return; }
           if (state.hls) { state.hls.destroy(); state.hls = null; }
           const hls = new Hls({ enableWorker: false });
           state.hls = hls;
           hls.loadSource(url);
           hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
           hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) playDirect(); });
         });
       });
     }
-    const onP2 = () => { video.style.visibility='visible'; video.removeEventListener('playing',onP2); };
-    video.addEventListener('playing', onP2);
-    setTimeout(() => { video.style.visibility='visible'; }, 5000);
   }
   
   showChannelInfo(idx);
@@ -1733,24 +1763,8 @@ function showChannelInfo(idx) {
 }
 
 function changeChannel(newIdx) {
-  const flash = document.getElementById('black-flash');
-  // Tampilkan layar hitam dulu
-  flash.classList.add('active');
-  setTimeout(() => {
-    playChannel(newIdx);
-    // Tunggu video benar-benar mulai main baru hilangkan layar hitam
-    const vid = document.getElementById('video-el');
-    const onPlay = () => {
-      setTimeout(() => flash.classList.remove('active'), 200);
-      vid.removeEventListener('playing', onPlay);
-    };
-    vid.addEventListener('playing', onPlay);
-    // Fallback: hapus overlay setelah 4 detik walau video belum main
-    setTimeout(() => {
-      flash.classList.remove('active');
-      vid.removeEventListener('playing', onPlay);
-    }, 4000);
-  }, 100);
+  // black-flash sudah tidak diperlukan karena video-loading menggantikan fungsinya
+  playChannel(newIdx);
 }
 
 // ===== CHANNEL NUMBER INPUT =====
